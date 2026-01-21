@@ -13,6 +13,12 @@ function safeLoadConfig(configPath) {
   return { config: yaml.load(raw) || {}, found: true };
 }
 
+function fileExists(relPath) {
+  // workspace root is available because workflow uses actions/checkout
+  const full = path.resolve(process.cwd(), relPath);
+  return fs.existsSync(full);
+}
+
 function renderMarkdown({ status, violations, configPath }) {
   const icon = status === "pass" ? "✅" : status === "warn" ? "⚠️" : "❌";
   const title =
@@ -100,6 +106,7 @@ function compileViolations({ config, prTitle }) {
     return violations;
   }
 
+  // --- PR title regex rule ---
   const titleRegex = config?.pull_request?.title_regex;
   if (titleRegex) {
     let re;
@@ -125,8 +132,23 @@ function compileViolations({ config, prTitle }) {
     }
   }
 
+  // --- Required files rule ---
+  const requiredFiles = config?.repo?.required_files;
+  if (Array.isArray(requiredFiles) && requiredFiles.length) {
+    const missing = requiredFiles.filter(f => !fileExists(f));
+    if (missing.length) {
+      violations.push({
+        ruleId: "required_files",
+        severity: "error",
+        message: `Missing required file(s): ${missing.map(m => `\`${m}\``).join(", ")}`,
+        howToFix: "Add the missing files at the repo root, or remove them from repo.required_files."
+      });
+    }
+  }
+
   return violations;
 }
+
 
 async function run() {
   try {
