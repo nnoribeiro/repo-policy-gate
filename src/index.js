@@ -72,7 +72,13 @@ function collectDepsFromLock(lock) {
         });
     }
 
-    return out;
+    const seen = new Set();
+    return out.filter(d => {
+        const key = `${d.name}@${d.version}`;
+        if (seen.has(key)) return false;
+        seen.add(key);
+        return true;
+    });
 }
 
 function renderMarkdown({ status, violations, configPath, meta }) {
