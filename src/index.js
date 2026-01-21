@@ -44,12 +44,6 @@ function fileExists(relPath) {
     return fs.existsSync(full);
 }
 
-function readPackageLock() {
-    const lockPath = path.resolve(process.cwd(), "package-lock.json");
-    if (!fs.existsSync(lockPath)) return null;
-    return JSON.parse(fs.readFileSync(lockPath, "utf8"));
-}
-
 function parseDenyRule(rule) {
     // Supports:
     // - "left-pad"
@@ -107,39 +101,6 @@ function collectDepsFromLock(lock) {
     }
 
     // Dedupe
-    const seen = new Set();
-    return out.filter(d => {
-        const key = `${d.name}@${d.version}`;
-        if (seen.has(key)) return false;
-        seen.add(key);
-        return true;
-    });
-}
-
-
-function collectDepsFromLock(lock) {
-    const out = [];
-
-    if (!lock.packages) return out;
-
-    for (const [pkgPath, info] of Object.entries(lock.packages)) {
-        if (!info || !info.version) continue;
-
-        let name = info.name;
-
-        // npm v7+: derive name from path if missing
-        if (!name && pkgPath.startsWith("node_modules/")) {
-            name = pkgPath.replace(/^node_modules\//, "");
-        }
-
-        if (!name) continue;
-
-        out.push({
-            name,
-            version: info.version
-        });
-    }
-
     const seen = new Set();
     return out.filter(d => {
         const key = `${d.name}@${d.version}`;

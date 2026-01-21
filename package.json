@@ -1,7 +1,7 @@
 {
   "name": "repo-policy-gate",
   "version": "1.0.0",
-  "description": "",
+  "description": "Lightweight GitHub Action that enforces repository and dependency policies on pull requests.",
   "main": "index.js",
   "scripts": {
     "build": "node scripts/build.js"
@@ -10,9 +10,14 @@
     "type": "git",
     "url": "git+https://github.com/nnoribeiro/repo-policy-gate.git"
   },
-  "keywords": [],
-  "author": "",
-  "license": "ISC",
+  "keywords": [
+    "github-action",
+    "policy",
+    "pull-request",
+    "security"
+  ],
+  "author": "nnoribeiro",
+  "license": "MIT",
   "bugs": {
     "url": "https://github.com/nnoribeiro/repo-policy-gate/issues"
   },
