@@ -8,6 +8,7 @@ severity_overrides:
   required_files: warn
   dependency_denylist: error
   pr_title_regex: error
+  package_lock_missing: error
 
 pull_request:
   # JavaScript RegExp (without / /)
@@ -24,3 +25,6 @@ dependencies:
   # Disallowed dependencies (exact match for now)
   deny:
     - left-pad
+    - lodash@<4.17.21
+    - minimist@<1.2.6
+    - @types/node@>=18 <19

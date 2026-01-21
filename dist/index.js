@@ -3,6 +3,7 @@ const github = require("@actions/github");
 const fs = require("fs");
 const path = require("path");
 const yaml = require("js-yaml");
+const semver = require("semver");
 
 const MARKER = "<!-- repo-policy-gate -->";
 
@@ -48,6 +49,73 @@ function readPackageLock() {
     if (!fs.existsSync(lockPath)) return null;
     return JSON.parse(fs.readFileSync(lockPath, "utf8"));
 }
+
+function parseDenyRule(rule) {
+    // Supports:
+    // - "left-pad"
+    // - "lodash@<4.17.21"
+    // - "@scope/pkg@>=1 <2"
+    // - "@scope/pkg" (no range)
+    const idx = rule.lastIndexOf("@");
+    if (idx > 0) {
+        return { name: rule.slice(0, idx), range: rule.slice(idx + 1).trim() || null };
+    }
+    return { name: rule.trim(), range: null };
+}
+
+function readPackageLock() {
+    const lockPath = path.resolve(process.cwd(), "package-lock.json");
+    if (!fs.existsSync(lockPath)) return { lock: null, reason: "missing" };
+
+    let lock;
+    try {
+        lock = JSON.parse(fs.readFileSync(lockPath, "utf8"));
+    } catch (e) {
+        return { lock: null, reason: "invalid_json" };
+    }
+    return { lock, reason: null };
+}
+
+function collectDepsFromLock(lock) {
+    const out = [];
+
+    // npm v7+ (lockfileVersion 2/3): lock.packages
+    if (lock && lock.packages && typeof lock.packages === "object") {
+        for (const [pkgPath, info] of Object.entries(lock.packages)) {
+            if (!info || !info.version) continue;
+
+            let name = info.name;
+            if (!name && pkgPath.startsWith("node_modules/")) {
+                name = pkgPath.replace(/^node_modules\//, "");
+            }
+            if (!name) continue;
+
+            out.push({ name, version: String(info.version) });
+        }
+    }
+
+    // npm v6 (lockfileVersion 1): lock.dependencies tree
+    if ((!lock.packages || !Object.keys(lock.packages || {}).length) && lock && lock.dependencies) {
+        const walk = (deps) => {
+            for (const [name, info] of Object.entries(deps || {})) {
+                if (!info) continue;
+                if (info.version) out.push({ name, version: String(info.version) });
+                if (info.dependencies) walk(info.dependencies);
+            }
+        };
+        walk(lock.dependencies);
+    }
+
+    // Dedupe
+    const seen = new Set();
+    return out.filter(d => {
+        const key = `${d.name}@${d.version}`;
+        if (seen.has(key)) return false;
+        seen.add(key);
+        return true;
+    });
+}
+
 
 function collectDepsFromLock(lock) {
     const out = [];
@@ -209,34 +277,83 @@ function compileViolations({ config, prTitle }) {
         }
     }
 
-    // --- Dependency denylist rule ---
+    // --- Dependency denylist rule (supports semver ranges) ---
     const denyDeps = config?.dependencies?.deny;
     if (Array.isArray(denyDeps) && denyDeps.length) {
-        const lock = readPackageLock();
-        if (lock) {
-            const deps = collectDepsFromLock(lock);
-            const banned = [];
+        const { lock, reason } = readPackageLock();
 
-            for (const rule of denyDeps) {
-                const [name, versionRule] = rule.split("@");
-                for (const dep of deps) {
-                    if (dep.name !== name) continue;
-                    if (!versionRule || dep.version === versionRule) {
-                        banned.push(`${dep.name}@${dep.version}`);
-                    }
+        // Validation: don't silently skip
+        if (!lock) {
+            violations.push({
+                ruleId: "package_lock_missing",
+                severity: "warn",
+                message:
+                    reason === "missing"
+                        ? "dependencies.deny is configured but package-lock.json was not found. Dependency checks were skipped."
+                        : "dependencies.deny is configured but package-lock.json could not be parsed. Dependency checks were skipped.",
+                howToFix:
+                    reason === "missing"
+                        ? "Commit a package-lock.json (npm install) or remove dependencies.deny."
+                        : "Fix package-lock.json (valid JSON) or regenerate it with npm install."
+            });
+        } else {
+            const deps = collectDepsFromLock(lock);
+
+            // Pre-parse rules and validate ranges
+            const parsedRules = [];
+            for (const rawRule of denyDeps) {
+                const { name, range } = parseDenyRule(String(rawRule));
+                if (!name) continue;
+
+                if (range && !semver.validRange(range)) {
+                    violations.push({
+                        ruleId: "dependency_denylist_invalid",
+                        severity: "error",
+                        message: `Invalid semver range in dependencies.deny: \`${rawRule}\``,
+                        howToFix: "Use a valid semver range (e.g. <1.2.3, >=1 <2, ^1.5.0) or remove the range."
+                    });
+                    // Don't try to enforce invalid rules; continue collecting errors though
+                    continue;
                 }
+
+                parsedRules.push({ rawRule: String(rawRule), name, range });
             }
 
-            if (banned.length) {
-                violations.push({
-                    ruleId: "dependency_denylist",
-                    severity: "error",
-                    message: `Disallowed dependencies found: ${banned.map(b => `\`${b}\``).join(", ")}`,
-                    howToFix: "Remove or replace the disallowed dependency, or update dependencies.deny."
-                });
+            // Only enforce if we didn't hit invalid range errors (optional strictness)
+            const hasInvalid = violations.some(v => v.ruleId === "dependency_denylist_invalid");
+            if (!hasInvalid) {
+                const banned = [];
+
+                for (const rule of parsedRules) {
+                    for (const dep of deps) {
+                        if (dep.name !== rule.name) continue;
+
+                        if (!rule.range) {
+                            banned.push(`${dep.name}@${dep.version}`);
+                            continue;
+                        }
+
+                        const v = semver.coerce(dep.version);
+                        if (!v) continue;
+
+                        if (semver.satisfies(v.version, rule.range, { includePrerelease: true })) {
+                            banned.push(`${dep.name}@${dep.version} (matches ${rule.rawRule})`);
+                        }
+                    }
+                }
+
+                if (banned.length) {
+                    violations.push({
+                        ruleId: "dependency_denylist",
+                        severity: "error",
+                        message: `Disallowed dependencies found: ${banned.map(b => `\`${b}\``).join(", ")}`,
+                        howToFix: "Remove or upgrade the dependency, or update dependencies.deny."
+                    });
+                }
             }
         }
     }
+
 
     return applySeverityOverrides(config, violations);
 }
